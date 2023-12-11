@@ -1,0 +1,42 @@
+type Booking = record {
+  id : nat64;
+  booking_time : nat64;
+  passenger_name : text;
+  flight_id : nat64;
+  seat_number : nat32;
+};
+type Error = variant {
+  NotFound : record { msg : text };
+  NoSeatsAvailable : record { msg : text };
+};
+type Flight = record {
+  id : nat64;
+  destination : text;
+  departure_time : nat64;
+  available_seats : nat32;
+  airline : text;
+};
+type FlightBookingPayload = record {
+  destination : text;
+  departure_time : nat64;
+  passenger_name : text;
+  available_seats : nat32;
+  flight_id : nat64;
+  airline : text;
+  seat_number : nat32;
+};
+type Result = variant { Ok : Booking; Err : Error };
+type Result_1 = variant { Ok : nat32; Err : Error };
+type Result_2 = variant { Ok; Err : Error };
+type Result_3 = variant { Ok : Flight; Err : Error };
+service : {
+  add_flight : (FlightBookingPayload) -> (opt Flight);
+  book_flight : (FlightBookingPayload) -> (Result);
+  check_flight_availability : (nat64) -> (Result_1) query;
+  delete_booking : (nat64) -> (Result_2);
+  delete_flight : (nat64) -> (Result_2);
+  get_booking : (nat64) -> (Result) query;
+  get_flight : (nat64) -> (Result_3) query;
+  update_booking : (nat64, FlightBookingPayload) -> (Result);
+  update_flight : (nat64, FlightBookingPayload) -> (Result_3) query;
+}
