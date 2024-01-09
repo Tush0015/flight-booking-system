@@ -1,17 +1,30 @@
 type Booking = record {
   id : nat64;
   booking_time : nat64;
+  booker_principal : text;
+  passenger_name : text;
+  flight_id : nat64;
+  seat_number : nat32;
+};
+type BookingPayload = record {
   passenger_name : text;
   flight_id : nat64;
   seat_number : nat32;
 };
 type Error = variant {
+  Error : record { msg : text };
+  InvalidPayload : record { errors : vec text };
   NotFound : record { msg : text };
+  NotBooker : record { msg : text };
+  NotAgent : record { msg : text };
   NoSeatsAvailable : record { msg : text };
 };
 type Flight = record {
   id : nat64;
+  total_seats : nat32;
   destination : text;
+  seats_booked : vec nat32;
+  agent_principal : text;
   departure_time : nat64;
   available_seats : nat32;
   airline : text;
@@ -19,24 +32,20 @@ type Flight = record {
 type FlightBookingPayload = record {
   destination : text;
   departure_time : nat64;
-  passenger_name : text;
   available_seats : nat32;
-  flight_id : nat64;
   airline : text;
-  seat_number : nat32;
 };
-type Result = variant { Ok : Booking; Err : Error };
-type Result_1 = variant { Ok : nat32; Err : Error };
-type Result_2 = variant { Ok; Err : Error };
-type Result_3 = variant { Ok : Flight; Err : Error };
+type Result = variant { Ok : Flight; Err : Error };
+type Result_1 = variant { Ok : Booking; Err : Error };
+type Result_2 = variant { Ok : nat32; Err : Error };
+type Result_3 = variant { Ok; Err : Error };
 service : {
-  add_flight : (FlightBookingPayload) -> (opt Flight);
-  book_flight : (FlightBookingPayload) -> (Result);
-  check_flight_availability : (nat64) -> (Result_1) query;
-  delete_booking : (nat64) -> (Result_2);
-  delete_flight : (nat64) -> (Result_2);
-  get_booking : (nat64) -> (Result) query;
-  get_flight : (nat64) -> (Result_3) query;
-  update_booking : (nat64, FlightBookingPayload) -> (Result);
-  update_flight : (nat64, FlightBookingPayload) -> (Result_3) query;
+  add_flight : (FlightBookingPayload) -> (Result);
+  book_flight : (BookingPayload) -> (Result_1);
+  check_flight_availability : (nat64) -> (Result_2) query;
+  delete_booking : (nat64) -> (Result_3);
+  get_booking : (nat64) -> (Result_1) query;
+  get_flight : (nat64) -> (Result) query;
+  update_booking : (nat64, BookingPayload) -> (Result_1);
+  update_flight : (nat64, FlightBookingPayload) -> (Result);
 }

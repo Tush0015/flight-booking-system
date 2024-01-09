@@ -1,61 +1,15 @@
 #[macro_use]
 extern crate serde;
-use candid::{Decode, Encode};
 use ic_cdk::api::time;
-use ic_stable_structures::memory_manager::{MemoryId, MemoryManager, VirtualMemory};
-use ic_stable_structures::{BoundedStorable, Cell, DefaultMemoryImpl, StableBTreeMap, Storable};
-use std::{borrow::Cow, cell::RefCell};
+use ic_cdk::caller;
+use ic_stable_structures::memory_manager::{MemoryId, MemoryManager};
+use ic_stable_structures::{DefaultMemoryImpl, StableBTreeMap};
+use std::cell::RefCell;
 
-type Memory = VirtualMemory<DefaultMemoryImpl>;
-type IdCell = Cell<u64, Memory>;
-
-#[derive(candid::CandidType, Clone, Serialize, Deserialize, Default)]
-struct Flight {
-    id: u64,
-    airline: String,
-    destination: String,
-    departure_time: u64,
-    available_seats: u32,
-}
-
-impl Storable for Flight {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl BoundedStorable for Flight {
-    const MAX_SIZE: u32 = 1024;
-    const IS_FIXED_SIZE: bool = false;
-}
-
-#[derive(candid::CandidType, Serialize, Deserialize, Default, Clone)]
-struct Booking {
-    id: u64,
-    flight_id: u64,
-    passenger_name: String,
-    seat_number: u32,
-    booking_time: u64,
-}
-
-impl Storable for Booking {
-    fn to_bytes(&self) -> std::borrow::Cow<[u8]> {
-        Cow::Owned(Encode!(self).unwrap())
-    }
-
-    fn from_bytes(bytes: std::borrow::Cow<[u8]>) -> Self {
-        Decode!(bytes.as_ref(), Self).unwrap()
-    }
-}
-
-impl BoundedStorable for Booking {
-    const MAX_SIZE: u32 = 1024;
-    const IS_FIXED_SIZE: bool = false;
-}
+mod types;
+use types::*;
+mod helpers;
+use helpers::*;
 
 thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> = RefCell::new(
@@ -83,17 +37,8 @@ thread_local! {
     ));
 }
 
-#[derive(candid::CandidType, Serialize, Deserialize, Default)]
-struct FlightBookingPayload {
-    flight_id: u64,
-    airline: String,
-    destination: String,
-    departure_time: u64,
-    available_seats: u32,
-    passenger_name: String,
-    seat_number: u32,
-}
-
+// Function that allows users to fetch a flight stored on the canister
+// Return an error if not found
 #[ic_cdk::query]
 fn get_flight(flight_id: u64) -> Result<Flight, Error> {
     match _get_flight(&flight_id) {
@@ -104,6 +49,8 @@ fn get_flight(flight_id: u64) -> Result<Flight, Error> {
     }
 }
 
+// Function that allows users to fetch a booking stored on the canister
+// Return an error if not found
 #[ic_cdk::query]
 fn get_booking(booking_id: u64) -> Result<Booking, Error> {
     match _get_booking(&booking_id) {
@@ -114,8 +61,11 @@ fn get_booking(booking_id: u64) -> Result<Booking, Error> {
     }
 }
 
+// Function that allows users to add a flight to the canister
+// Return an error if not found
 #[ic_cdk::update]
-fn add_flight(flight_payload: FlightBookingPayload) -> Option<Flight> {
+fn add_flight(flight_payload: FlightBookingPayload) -> Result<Flight, Error> {
+    validate_flight_payload(&flight_payload)?;
     let flight_id = FLIGHT_ID_COUNTER
         .with(|counter| {
             let current_value = *counter.borrow().get();
@@ -125,20 +75,25 @@ fn add_flight(flight_payload: FlightBookingPayload) -> Option<Flight> {
 
     let flight = Flight {
         id: flight_id,
+        agent_principal: caller().to_string(),
         airline: flight_payload.airline,
         destination: flight_payload.destination,
         departure_time: flight_payload.departure_time,
         available_seats: flight_payload.available_seats,
+        total_seats: flight_payload.available_seats,
+        seats_booked: Vec::new()
     };
 
-    FLIGHTS.with(|service| service.borrow_mut().insert(flight_id, flight.clone()));
-    Some(flight)
+    do_insert_flight(&flight.clone());
+    Ok(flight)
 }
 
+// Function that allows users to add a flight stored on the canister
+// Return an error if not found
 #[ic_cdk::update]
-fn book_flight(booking_payload: FlightBookingPayload) -> Result<Booking, Error> {
+fn book_flight(booking_payload: BookingPayload) -> Result<Booking, Error> {
     // Check if the flight exists
-    let flight = match _get_flight(&booking_payload.flight_id) {
+    let mut flight = match _get_flight(&booking_payload.flight_id) {
         Some(flight) => flight,
         None => {
             return Err(Error::NotFound {
@@ -146,20 +101,13 @@ fn book_flight(booking_payload: FlightBookingPayload) -> Result<Booking, Error> 
             });
         }
     };
+    let _check_flight_payload = validate_booking_payload(&booking_payload, &flight)?;
 
-    // Check if there are available seats
-    if flight.available_seats == 0 {
-        return Err(Error::NoSeatsAvailable {
-            msg: "no available seats for the specified flight".to_string(),
-        });
-    }
+    // update flight fields
+    flight.available_seats = flight.available_seats - 1;
+    flight.seats_booked.push(booking_payload.seat_number);
 
-    // Decrement the available seats
-    let updated_flight = Flight {
-        available_seats: flight.available_seats - 1,
-        ..flight.clone()
-    };
-    FLIGHTS.with(|flights| flights.borrow_mut().insert(flight.id, updated_flight));
+    do_insert_flight(&flight);
 
     // Generate a new booking id
     let booking_id = BOOKING_ID_COUNTER
@@ -172,14 +120,15 @@ fn book_flight(booking_payload: FlightBookingPayload) -> Result<Booking, Error> 
     // Create the booking
     let booking = Booking {
         id: booking_id,
-        flight_id: booking_payload.flight_id,
+        booker_principal: caller().to_string(),
         passenger_name: booking_payload.passenger_name,
+        flight_id: booking_payload.flight_id,
         seat_number: booking_payload.seat_number,
         booking_time: time(),
     };
 
     // Insert the booking into the BOOKINGS map
-    BOOKINGS.with(|bookings| bookings.borrow_mut().insert(booking_id, booking.clone()));
+    do_insert_booking(&booking.clone());
 
     Ok(booking)
 }
@@ -193,7 +142,9 @@ fn _get_booking(booking_id: &u64) -> Option<Booking> {
     BOOKINGS.with(|bookings| bookings.borrow().get(booking_id))
 }
 
-#[ic_cdk::query]
+// Function that allows users to update a flight stored on the canister
+// Return an error if not found
+#[ic_cdk::update]
 fn update_flight(flight_id: u64, new_data: FlightBookingPayload) -> Result<Flight, Error> {
     // Check if the flight exists
     let mut flight = match _get_flight(&flight_id) {
@@ -204,38 +155,36 @@ fn update_flight(flight_id: u64, new_data: FlightBookingPayload) -> Result<Fligh
             });
         }
     };
+    is_caller_agent_principal(&flight)?;
+
+    // prevents a flight with bookings to be updated as this 
+    // could break some of the other functionalities relying on values such as total_seats
+    // and potentially cause the canister's booking state to be inaccurate
+    if !flight.seats_booked.is_empty(){
+        return Err(Error::Error { msg: format!("Cannot update a flight that is already booked") })
+    }
+
+    validate_flight_payload(&new_data)?;
+
 
     // Update flight data
     flight.airline = new_data.airline;
     flight.destination = new_data.destination;
     flight.departure_time = new_data.departure_time;
     flight.available_seats = new_data.available_seats;
+    flight.total_seats = new_data.available_seats;
 
     // Update flight in the map
-    FLIGHTS.with(|flights| flights.borrow_mut().insert(flight_id, flight.clone()));
+    do_insert_flight(&flight.clone());
 
     Ok(flight)
 }
 
-#[ic_cdk::update]
-fn delete_flight(flight_id: u64) -> Result<(), Error> {
-    // Check if the flight exists
-    if let Some(_flight) = _get_flight(&flight_id) {
-        // Remove the flight
-        FLIGHTS.with(|flights| {
-            flights.borrow_mut().remove(&flight_id);
-        });
 
-        Ok(())
-    } else {
-        Err(Error::NotFound {
-            msg: format!("a flight with id={} not found", flight_id),
-        })
-    }
-}
-
+// Function that allows users to update a booking stored on the canister
+// Return an error if booking or flight not found
 #[ic_cdk::update]
-fn update_booking(booking_id: u64, new_data: FlightBookingPayload) -> Result<Booking, Error> {
+fn update_booking(booking_id: u64, new_data: BookingPayload) -> Result<Booking, Error> {
     // Check if the booking exists
     let mut booking = match _get_booking(&booking_id) {
         Some(b) => b,
@@ -245,9 +194,16 @@ fn update_booking(booking_id: u64, new_data: FlightBookingPayload) -> Result<Boo
             });
         }
     };
+    is_caller_booker_principal(&booking)?;
+
+    if booking.flight_id != new_data.flight_id{
+        return Err(Error::Error {
+             msg: format!("Invalid flight id specified as the flight id of the booking is {}", booking.flight_id)
+        })
+    }
 
     // Check if the flight exists
-    let _flight = match _get_flight(&new_data.flight_id) {
+    let mut flight = match _get_flight(&new_data.flight_id) {
         Some(f) => f,
         None => {
             return Err(Error::NotFound {
@@ -255,29 +211,41 @@ fn update_booking(booking_id: u64, new_data: FlightBookingPayload) -> Result<Boo
             });
         }
     };
+    let _can_update_booking = validate_booking_payload(&new_data, &flight)?;
 
-    // Update booking data
-    booking.flight_id = new_data.flight_id;
+    // Update flight fields
+    
+    // remove current seat number of booking from the seats_booked vec
+    flight.seats_booked = flight.seats_booked.into_iter().filter(|&seat_number| seat_number != booking.seat_number).collect();
+    // add new seat number to the seats_booked vec
+    flight.seats_booked.push(new_data.seat_number);
+    
+    do_insert_flight(&flight);
+
     booking.passenger_name = new_data.passenger_name;
     booking.seat_number = new_data.seat_number;
 
     // Update booking in the map
-    BOOKINGS.with(|bookings| bookings.borrow_mut().insert(booking_id, booking.clone()));
+    do_insert_booking(&booking.clone());
 
     Ok(booking)
 }
 
+// Function that allows users to delete a booking stored on the canister
+// Return an error if not found
 #[ic_cdk::update]
 fn delete_booking(booking_id: u64) -> Result<(), Error> {
     // Check if the booking exists
     if let Some(booking) = _get_booking(&booking_id) {
+        is_caller_booker_principal(&booking)?;
         // Increment the available seats for the corresponding flight
         if let Some(flight) = _get_flight(&booking.flight_id) {
             let updated_flight = Flight {
-                available_seats: flight.available_seats + 1,
+                available_seats: flight.available_seats.clone() + 1,
+                seats_booked: flight.seats_booked.clone().into_iter().filter(|&seat_number| seat_number != booking.seat_number).collect(),
                 ..flight.clone()
             };
-            FLIGHTS.with(|flights| flights.borrow_mut().insert(flight.id, updated_flight));
+            do_insert_flight(&updated_flight);
         }
 
         // Remove the booking
@@ -292,7 +260,8 @@ fn delete_booking(booking_id: u64) -> Result<(), Error> {
         })
     }
 }
-
+// Function that allows users to check the availability of a flight stored on the canister
+// Return an error if not found
 #[ic_cdk::query]
 fn check_flight_availability(flight_id: u64) -> Result<u32, Error> {
     match _get_flight(&flight_id) {
@@ -303,10 +272,14 @@ fn check_flight_availability(flight_id: u64) -> Result<u32, Error> {
     }
 }
 
-#[derive(candid::CandidType, Deserialize, Serialize)]
-enum Error {
-    NotFound { msg: String },
-    NoSeatsAvailable { msg: String },
+// helper method to perform insert.
+fn do_insert_flight(flight: &Flight) {
+    FLIGHTS.with(|flights| flights.borrow_mut().insert(flight.id, flight.clone()));
+}
+// helper method to perform insert.
+fn do_insert_booking(booking: &Booking) {
+    // Insert the booking into the BOOKINGS map
+    BOOKINGS.with(|bookings| bookings.borrow_mut().insert(booking.id, booking.clone()));
 }
 
 // need this to generate candid
